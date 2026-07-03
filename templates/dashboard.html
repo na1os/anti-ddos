@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <title>Network Guardian Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background: #0f1117; color: #fff; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; }
+        .header { text-align: center; border-bottom: 2px solid #30363d; padding-bottom: 20px; margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 15px; margin-bottom: 20px; }
+        .card { background: #161b22; padding: 20px; border-radius: 10px; border: 1px solid #30363d; }
+        .stat-number { font-size: 36px; font-weight: bold; color: #58a6ff; }
+        .stat-label { color: #8b949e; font-size: 12px; text-transform: uppercase; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 10px; border-bottom: 1px solid #30363d; text-align: left; font-size: 14px; }
+        th { color: #58a6ff; }
+        .btn { background: #21262d; color: #fff; border: 1px solid #30363d; padding: 8px 16px; cursor: pointer; border-radius: 5px; }
+        .btn:hover { background: #30363d; }
+        .btn-danger { background: #da3633; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; color: white; font-size: 12px; }
+        .progress-bar { background: #21262d; border-radius: 5px; height: 8px; width: 80px; display: inline-block; vertical-align: middle; }
+        .progress-fill { background: #f85149; height: 8px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>🛡️ ADVANCED NETWORK GUARDIAN</h1>
+</div>
+
+<div class="grid">
+    <div class="card"><div class="stat-number" id="active-ips">0</div><div class="stat-label">IP-uri Active Live</div></div>
+    <div class="card"><div class="stat-number" id="blocked-total">0</div><div class="stat-label">Atacuri Blocate Acum</div></div>
+    <div class="card"><div class="stat-number">{{ threshold }}</div><div class="stat-label">Prag Conexiuni</div></div>
+    <div class="card"><div class="stat-number">{{ ban_duration }}s</div><div class="stat-label">Durată Ban</div></div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+    <button class="btn" onclick="loadChart('1h')">1 Oră</button>
+    <button class="btn" onclick="loadChart('24h')">24 Ore</button>
+    <button class="btn" onclick="loadChart('7d')">7 Zile</button>
+    <button class="btn" onclick="loadChart('31d')">31 Zile</button>
+    <canvas id="attackChart" height="60"></canvas>
+</div>
+
+<div class="grid" style="grid-template-columns: 1fr 1fr;">
+    <div class="card">
+        <h3>Live Feed (Monitorizare Activă)</h3>
+        <table>
+            <thead><tr><th>IP</th><th>Conexiuni</th><th>Risc</th></tr></thead>
+            <tbody id="live-feed"></tbody>
+        </table>
+    </div>
+    <div class="card">
+        <h3>Istoric Atacuri (Blocate recent)</h3>
+        <table>
+            <thead><tr><th>IP</th><th>Țară</th><th>Conexiuni</th><th>Acțiune</th></tr></thead>
+            <tbody id="history-feed"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    let chart = null;
+    function updateLive() {
+        fetch('/api/live').then(r => r.json()).then(data => {
+            document.getElementById('active-ips').innerText = data.active_ips;
+            document.getElementById('blocked-total').innerText = data.blocked_total;
+            let html = data.attacks.length === 0 ? '<tr><td colspan="3" style="color:#3fb950;">Sistem curat.</td></tr>' : '';
+            data.attacks.forEach(a => {
+                let color = a.percent > 70 ? '#f85149' : (a.percent > 40 ? '#d29922' : '#3fb950');
+                html += `<tr><td>${a.ip}</td><td>${a.count}</td><td><div class="progress-bar"><div class="progress-fill" style="width:${a.percent}%; background:${color};"></div></div></td></tr>`;
+            });
+            document.getElementById('live-feed').innerHTML = html;
+        });
+    }
+
+    function loadHistory() {
+        fetch('/api/all_attacks').then(r => r.json()).then(data => {
+            let html = data.length === 0 ? '<tr><td colspan="4">Niciun atac.</td></tr>' : '';
+            data.forEach(a => {
+                html += `<tr><td>${a.ip}</td><td>${a.country}</td><td>${a.connections}</td><td><button class="btn-danger" onclick="unban('${a.ip}')">Unban</button></td></tr>`;
+            });
+            document.getElementById('history-feed').innerHTML = html;
+        });
+    }
+
+    function unban(ip) {
+        fetch(`/api/unban/${ip}`).then(r => r.json()).then(res => { alert(res.message); loadHistory(); updateLive(); });
+    }
+
+    function loadChart(period) {
+        fetch(`/api/history/${period}`).then(r => r.json()).then(data => {
+            if(chart) chart.destroy();
+            chart = new Chart(document.getElementById('attackChart').getContext('2d'), {
+                type: 'bar',
+                data: { labels: data.map(d => d.time), datasets: [{ label: 'Atacuri', data: data.map(d => d.attacks), backgroundColor: '#58a6ff' }] },
+                options: { scales: { y: { beginAtZero: true } } }
+            });
+        });
+    }
+
+    loadChart('24h');
+    updateLive();
+    loadHistory();
+    setInterval(updateLive, 2000);
+    setInterval(loadHistory, 10000);
+</script>
+</body>
+</html>

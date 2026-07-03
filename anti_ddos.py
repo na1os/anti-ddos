@@ -4,131 +4,143 @@ import psutil
 import requests
 import platform
 import subprocess
-import ipaddress
 from datetime import datetime
 from dotenv import load_dotenv
 from colorama import init, Fore, Style
 
-# Inițializare colorama pentru culori în consolă (funcționează pe Win/Linux)
 init(autoreset=True)
 
-# Încărcare configurație din .env
-load_dotenv("config.env")
+class AntiDDoS:
+    def __init__(self):
+        load_dotenv("config.env")
+        
+        self.threshold = int(os.getenv("CONNECTION_THRESHOLD", 100))
+        self.feed_threshold = int(os.getenv("LIVE_FEED_THRESHOLD", 15))
+        self.interval = int(os.getenv("CHECK_INTERVAL", 2))
+        
+        self.discord_url = os.getenv("DISCORD_WEBHOOK_URL", "")
+        self.tg_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.tg_chat = os.getenv("TELEGRAM_CHAT_ID", "")
+        
+        whitelist_str = os.getenv("WHITELIST_IPS", "")
+        self.whitelist = set(ip.strip() for ip in whitelist_str.split(",") if ip.strip())
+        
+        self.blocked_ips = set()
+        self.alerted_ips = set()
+        self.total_attacks_blocked = 0
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-THRESHOLD = int(os.getenv("CONNECTION_THRESHOLD", 100))
-LIVE_FEED_THRESHOLD = int(os.getenv("LIVE_FEED_THRESHOLD", 15))
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 2))
+    def clear_screen(self):
+        os.system('cls' if platform.system() == "Windows" else 'clear')
 
-# Procesare Whitelist
-whitelist_str = os.getenv("WHITELIST_IPS", "")
-WHITELIST = [ip.strip() for ip in whitelist_str.split(",") if ip.strip()]
+    def send_alerts(self, ip, count):
+        if ip in self.alerted_ips:
+            return
+        self.alerted_ips.add(ip)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        if self.discord_url:
+            msg = {"content": f"🚨 **THREAT NEUTRALIZED**\n```http\nIP: {ip}\nPayload: {count} conns\nTime: {timestamp}\nAction: FIREWALL + QUARANTINE```"}
+            try: requests.post(self.discord_url, json=msg, timeout=3)
+            except: pass
 
-blocked_ips = set()
+        if self.tg_token and self.tg_chat:
+            msg = f"🚨 *Atac Oprit!*\n*IP:* `{ip}`\n*Conexiuni:* `{count}`"
+            url = f"https://api.telegram.org/bot{self.tg_token}/sendMessage"
+            try: requests.post(url, data={"chat_id": self.tg_chat, "text": msg, "parse_mode": "Markdown"}, timeout=3)
+            except: pass
 
-def print_banner():
-    print(Fore.CYAN + "="*60)
-    print(Fore.YELLOW + "      SISTEM AVANSAT DE MONITORIZARE ȘI PROTECȚIE")
-    print(Fore.CYAN + "="*60)
-    print(f"{Fore.GREEN}[*] Prag blocare:{Style.RESET_ALL} {THRESHOLD} conexiuni/IP")
-    print(f"{Fore.GREEN}[*] Prag afișare live:{Style.RESET_ALL} {LIVE_FEED_THRESHOLD} conexiuni/IP")
-    print(f"{Fore.GREEN}[*] Whitelist:{Style.RESET_ALL} {', '.join(WHITELIST) if WHITELIST else 'Niciunul'}")
-    print(f"{Fore.GREEN}[*] Discord Webhook:{Style.RESET_ALL} {'Configurat' if DISCORD_WEBHOOK_URL else 'Lipsă'}")
-    print(f"{Fore.GREEN}[*] Telegram Alert:{Style.RESET_ALL} {'Configurat' if TELEGRAM_BOT_TOKEN else 'Lipsă'}")
-    print(Fore.CYAN + "-"*60)
-    print(Fore.MAGENTA + "[*] Pornire monitorizare... (Apasă Ctrl+C pentru oprire)\n")
+    def block_ip_system(self, ip):
+        # 1. Propriul sistem (Carantină Internă)
+        self.blocked_ips.add(ip)
+        self.total_attacks_blocked += 1
+        
+        # 2. Sistemul de Firewall (OS Level)
+        try:
+            if platform.system() == "Linux":
+                subprocess.run(["iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"], check=True)
+            else:
+                subprocess.run(["netsh", "advfirewall", "firewall", "add", "rule", f"name=Block_{ip}", "dir=in", "action=block", f"remoteip={ip}"], check=True)
+            return True
+        except:
+            return False
 
-def send_discord_alert(ip, count):
-    if not DISCORD_WEBHOOK_URL: return
-    message = {
-        "content": f"🚨 **Alertă de Securitate: Posibil Atac DDoS!**\n"
-                   f"```http\nIP Atacator: {ip}\nConexiuni Deschise: {count}\nTimp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nAcțiune: BLOCAT în Firewall```"
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=message, timeout=5)
-    except Exception as e:
-        print(Fore.RED + f"[EROARE Discord] {e}")
+    def get_connections(self):
+        ip_counts = {}
+        try:
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.status == psutil.CONN_ESTABLISHED and conn.raddr:
+                    ip = conn.raddr.ip
+                    if ip not in self.whitelist:
+                        ip_counts[ip] = ip_counts.get(ip, 0) + 1
+        except psutil.AccessDenied:
+            print(f"{Fore.RED}[EROARE FATALĂ] Trebuie să rulezi ca Administrator/Root!")
+            exit(1)
+        return ip_counts
 
-def send_telegram_alert(ip, count):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
-    message = (f"🚨 *Alertă: Posibil Atac DDoS!*\n"
-               f"*IP Atacator:* `{ip}`\n"
-               f"*Conexiuni:* `{count}`\n"
-               f"*Acțiune:* `Blocat în Firewall`")
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, data=payload, timeout=5)
-    except Exception as e:
-        print(Fore.RED + f"[EROARE Telegram] {e}")
+    def draw_progress_bar(self, count):
+        # Calculează procentajul față de pragul de blocare
+        percent = min(count / self.threshold, 1.0)
+        bar_length = 20
+        filled = int(bar_length * percent)
+        bar = '█' * filled + '░' * (bar_length - filled)
+        
+        if percent < 0.5:
+            return f"{Fore.GREEN}[{bar}]"
+        elif percent < 0.9:
+            return f"{Fore.YELLOW}[{bar}]"
+        else:
+            return f"{Fore.RED}{Style.BRIGHT}[{bar}]"
 
-def block_ip(ip):
-    """Blochează IP-ul folosind comenzi native de sistem."""
-    try:
-        if platform.system() == "Linux":
-            subprocess.run(["sudo", "iptables", "-I", "INPUT", "-s", ip, "-j", "DROP"], check=True)
-        elif platform.system() == "Windows":
-            subprocess.run(["netsh", "advfirewall", "firewall", "add", "rule", f"name=Block_{ip}", "dir=in", "action=block", f"remoteip={ip}"], check=True)
-        return True
-    except Exception as e:
-        print(Fore.RED + f"[EROARE BLOCARE] {ip}: {e}")
-        return False
-
-def get_active_connections():
-    """Numără conexiunile active (ESTABLISHED) per IP extern."""
-    ip_counts = {}
-    try:
-        connections = psutil.net_connections(kind='inet')
-        for conn in connections:
-            if conn.status == psutil.CONN_ESTABLISHED and conn.raddr:
-                ip = conn.raddr.ip
-                # Ignoră IP-urile din whitelist
-                if ip not in WHITELIST:
-                    ip_counts[ip] = ip_counts.get(ip, 0) + 1
-    except psutil.AccessDenied:
-        print(Fore.RED + "[EROARE] Acces refuzat. Rulați ca Administrator/Root!")
-        exit(1)
-    except Exception as e:
-        print(Fore.RED + f"[EROARE Conexiuni] {e}")
-    return ip_counts
-
-def main():
-    print_banner()
-    
-    try:
-        while True:
-            ip_counts = get_active_connections()
-            current_time = datetime.now().strftime('%H:%M:%S')
+    def draw_dashboard(self, ip_counts):
+        self.clear_screen()
+        current_time = datetime.now().strftime('%H:%M:%S')
+        
+        print(f"{Fore.CYAN}╔══════════════════════════════════════════════════════════╗")
+        print(f"{Fore.CYAN}║{Fore.YELLOW}      ADVANCED NETWORK GUARDIAN & DDoS MITIGATION       {Fore.CYAN}║")
+        print(f"{Fore.CYAN}╠══════════════════════════════════════════════════════════╣")
+        print(f"{Fore.CYAN}║{Fore.WHITE} Time: {current_time}  | Prag: {self.threshold} | Interval: {self.interval}s      {Fore.CYAN}║")
+        print(f"{Fore.CYAN}║{Fore.LIGHTGREEN_EX} Status: PROTECTED   {Fore.WHITE}Atacuri Oprite: {Fore.RED}{self.total_attacks_blocked:<4}          {Fore.CYAN}║")
+        print(f"{Fore.CYAN}╚══════════════════════════════════════════════════════════╝")
+        
+        active_threats = False
+        
+        sorted_ips = sorted(ip_counts.items(), key=lambda item: item[1], reverse=True)
+        
+        for ip, count in sorted_ips:
+            if ip in self.blocked_ips:
+                continue # Sistemul propriu: ignorăm IP-urile blocate (Carantină)
+                
+            if count < self.feed_threshold:
+                continue
+                
+            active_threats = True
+            bar = self.draw_progress_bar(count)
             
-            # Sortăm conexiunile descrescător după număr
-            for ip, count in sorted(ip_counts.items(), key=lambda item: item[1], reverse=True):
-                if count >= LIVE_FEED_THRESHOLD:
-                    # Determinăm statusul și culoarea
-                    if count >= THRESHOLD:
-                        status = f"{Fore.RED}{Style.BRIGHT}*** ATAC DETECTAT ***"
-                        
-                        # Dacă depășește pragul și nu a fost deja blocat
-                        if ip not in blocked_ips:
-                            print(f"{Fore.RED}[{current_time}] [ALERTĂ CRITICĂ] {ip:<15} | Conexiuni: {count:<5} | Trimitere notificări...")
-                            send_discord_alert(ip, count)
-                            send_telegram_alert(ip, count)
-                            
-                            if block_ip(ip):
-                                blocked_ips.add(ip)
-                                print(f"{Fore.RED}[{current_time}] [FIREWALL] IP-ul {ip} a fost BLOCAT cu succes.")
-                    else:
-                        status = f"{Fore.YELLOW}Suspicios"
-                        
-                    # Afișare live feed
-                    print(f"{Fore.CYAN}[{current_time}] {Style.RESET_ALL}IP: {ip:<15} | Conexiuni: {count:<5} | Status: {status}")
-            
-            time.sleep(CHECK_INTERVAL)
-            
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}[*] Oprire sistem. IP-uri blocate în această sesiune: {len(blocked_ips)}")
-        print(Fore.CYAN + "La revedere!")
+            if count >= self.threshold:
+                print(f"  {Fore.RED}{Style.BRIGHT}[!! THREAT DETECTED !!]{Style.RESET_ALL} {ip:<15} {bar} {count} conns")
+                print(f"  {Fore.LIGHTRED_EX}--> Inițiere Blocare Firewall & Carantină Internă...")
+                if self.block_ip_system(ip):
+                    print(f"  {Fore.GREEN}--> [SUCCESS] {ip} a fost ELIMINAT.")
+                    self.send_alerts(ip, count)
+                time.sleep(1) # Pauză scurtă pentru efect vizual
+            else:
+                status = f"{Fore.YELLOW}Suspicios" if count > self.threshold * 0.6 else f"{Fore.GREEN}Monitorizat"
+                print(f"  {Fore.CYAN}IP:{Style.RESET_ALL} {ip:<15} {bar} {count} conns | {status}")
+
+        if not active_threats:
+            print(f"\n  {Fore.LIGHTBLACK_EX} Sistemul funcționează normal. Niciun atac detectat.")
+
+        print(f"\n{Fore.LIGHTBLACK_EX} [Ctrl+C pentru oprire]")
+
+    def run(self):
+        try:
+            while True:
+                ip_counts = self.get_connections()
+                self.draw_dashboard(ip_counts)
+                time.sleep(self.interval)
+        except KeyboardInterrupt:
+            print(f"\n\n{Fore.YELLOW}[*] Sistem oprit. Total atacuri blocate: {self.total_attacks_blocked}")
 
 if __name__ == "__main__":
-    main()
+    app = AntiDDoS()
+    app.run()
